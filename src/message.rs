@@ -149,8 +149,7 @@ pub struct SyslogMessage {
     pub severity: severity::SyslogSeverity,
     pub facility: facility::SyslogFacility,
     pub version: i32,
-    pub timestamp: Option<time_t>,
-    pub timestamp_nanos: Option<i32>,
+    pub timestamp: Option<String>,
     pub hostname: Option<String>,
     pub appname: Option<String>,
     pub procid: Option<ProcId>,
@@ -212,7 +211,6 @@ mod tests {
             facility: LOG_KERN,
             version: 1,
             timestamp: None,
-            timestamp_nanos: None,
             hostname: None,
             appname: None,
             procid: None,
@@ -242,6 +240,6 @@ mod tests {
     #[test]
     fn test_fromstr() {
         let msg = "<1>1 1985-04-12T23:20:50.52Z host - - - -".parse::<SyslogMessage>().expect("Should parse empty message");
-        assert_eq!(msg.timestamp, Some(482196050));
+        assert_eq!(msg.timestamp, Some(String::from("1985-04-12T23:20:50.52Z")));
     }
 }

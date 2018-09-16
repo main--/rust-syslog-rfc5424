@@ -32,7 +32,6 @@
 //!
 #[cfg(test)]
 extern crate assert_matches;
-extern crate time;
 #[cfg(feature = "serde-serialize")]
 extern crate serde;
 #[cfg(feature = "serde-serialize")]

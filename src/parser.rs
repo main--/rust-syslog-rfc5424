@@ -6,8 +6,6 @@ use std::string;
 use std::fmt;
 use std::error::Error;
 
-use time;
-
 use severity;
 use facility;
 use message::{SyslogMessage, ProcId, StructuredData};
@@ -222,66 +220,6 @@ fn parse_num(s: &str, min_digits: usize, max_digits: usize) -> ParseResult<(i32,
     }
 }
 
-fn parse_decimal(d: &str, min_digits: usize, max_digits: usize) -> ParseResult<(i32, &str)> {
-    parse_num(d, min_digits, max_digits)
-        .map(|(val, s)| {
-            let mut multiplicand = 1;
-            let z = 10 - (d.len() - s.len());
-
-            for _i in 1..(z) {
-                multiplicand *= 10;
-            }
-            (val * multiplicand, s)
-        })
-}
-
-fn parse_timestamp(m: &str) -> ParseResult<(Option<time::Timespec>, &str)> {
-    let mut rest = m;
-    if rest.starts_with('-') {
-        return Ok((None, &rest[1..]));
-    }
-    let mut tm = time::empty_tm();
-    tm.tm_year = take_item!(parse_num(rest, 4, 4), rest) - 1900;
-    take_char!(rest, '-');
-    tm.tm_mon = take_item!(parse_num(rest, 2, 2), rest) - 1;
-    take_char!(rest, '-');
-    tm.tm_mday = take_item!(parse_num(rest, 2, 2), rest);
-    take_char!(rest, 'T');
-    tm.tm_hour = take_item!(parse_num(rest, 2, 2), rest);
-    take_char!(rest, ':');
-    tm.tm_min = take_item!(parse_num(rest, 2, 2), rest);
-    take_char!(rest, ':');
-    tm.tm_sec = take_item!(parse_num(rest, 2, 2), rest);
-    if rest.starts_with('.') {
-        take_char!(rest, '.');
-        tm.tm_nsec = take_item!(parse_decimal(rest, 1, 6), rest);
-    }
-    // Tm::utcoff is totally broken, don't use it.
-    let utc_offset_mins = match rest.chars().next() {
-        None => 0,
-        Some('Z') => {
-            rest = &rest[1..];
-            0
-        }
-        Some(c) => {
-            let (sign, irest) = match c {
-                '+' => (1, &rest[1..]),
-                '-' => (-1, &rest[1..]),
-                _ => {
-                    return Err(ParseErr::InvalidUTCOffset);
-                }
-            };
-            let hours = i32::from_str(&irest[0..2]).map_err(ParseErr::IntConversionErr)?;
-            let minutes = i32::from_str(&irest[3..5]).map_err(ParseErr::IntConversionErr)?;
-            rest = &irest[5..];
-            minutes + hours * 60 * sign
-        }
-    };
-    tm = tm + time::Duration::minutes(i64::from(utc_offset_mins));
-    tm.tm_isdst = -1;
-    Ok((Some(tm.to_utc().to_timespec()), rest))
-}
-
 fn parse_term(m: &str,
               min_length: usize,
               max_length: usize)
@@ -315,7 +253,7 @@ fn parse_message_s(m: &str) -> ParseResult<SyslogMessage> {
     let (sev, fac) = parse_pri_val(prival)?;
     let version = take_item!(parse_num(rest, 1, 2), rest);
     take_char!(rest, ' ');
-    let event_time = take_item!(parse_timestamp(rest), rest);
+    let timestamp = take_item!(parse_term(rest, 1, 255), rest);
     take_char!(rest, ' ');
     let hostname = take_item!(parse_term(rest, 1, 255), rest);
     take_char!(rest, ' ');
@@ -345,8 +283,7 @@ fn parse_message_s(m: &str) -> ParseResult<SyslogMessage> {
        severity: sev,
        facility: fac,
        version,
-       timestamp: event_time.map(|t| t.sec),
-       timestamp_nanos: event_time.map(|t| t.nsec),
+       timestamp,
        hostname,
        appname,
        procid,
@@ -409,19 +346,19 @@ mod tests {
     #[test]
     fn test_with_time_zulu() {
         let msg = parse_message("<1>1 2015-01-01T00:00:00Z host - - - -").expect("Should parse empty message");
-        assert_eq!(msg.timestamp, Some(1420070400));
+        assert_eq!(msg.timestamp, Some(String::from("2015-01-01T00:00:00Z")));
     }
 
     #[test]
     fn test_with_time_offset() {
         let msg = parse_message("<1>1 2015-01-01T00:00:00+00:00 - - - - -").expect("Should parse empty message");
-        assert_eq!(msg.timestamp, Some(1420070400));
+        assert_eq!(msg.timestamp, Some(String::from("2015-01-01T00:00:00+00:00")));
     }
 
     #[test]
     fn test_with_time_offset_nonzero() {
         let msg = parse_message("<1>1 2015-01-01T00:00:00+10:00 - - - - -").expect("Should parse empty message");
-        assert_eq!(msg.timestamp, Some(1420106400));
+        assert_eq!(msg.timestamp, Some(String::from("2015-01-01T00:00:00+10:00")));
     }
 
     #[test]
@@ -433,7 +370,7 @@ mod tests {
         assert_eq!(msg.appname, Some(String::from("CROND")));
         assert_eq!(msg.procid, Some(message::ProcId::PID(10391)));
         assert_eq!(msg.msg, String::from("some_message"));
-        assert_eq!(msg.timestamp, Some(1452816241));
+        assert_eq!(msg.timestamp, Some(String::from("2016-01-15T00:04:01+00:00")));
         assert_eq!(msg.sd.len(), 1);
         let v = msg.sd.find_tuple("meta", "sequenceId").expect("Should contain meta sequenceId");
         assert_eq!(v, "29");
@@ -448,7 +385,7 @@ mod tests {
         assert_eq!(msg.appname, Some(String::from("CROND")));
         assert_eq!(msg.procid, Some(message::ProcId::PID(10391)));
         assert_eq!(msg.msg, String::from("some_message"));
-        assert_eq!(msg.timestamp, Some(1452816241));
+        assert_eq!(msg.timestamp, Some(String::from("2016-01-15T00:04:01Z")));
         assert_eq!(msg.sd.len(), 2);
         assert_eq!(msg.sd
                        .find_sdid("meta")
@@ -485,34 +422,6 @@ mod tests {
     }
 
     #[test]
-    fn test_example_timestamps() {
-        // these are the example timestamps in the rfc
-
-        let msg = parse_message("<1>1 1985-04-12T23:20:50.52Z host - - - -")
-            .expect("Should parse empty message");
-        assert_eq!(msg.timestamp, Some(482196050));
-        assert_eq!(msg.timestamp_nanos, Some(520000000));
-
-        let msg = parse_message("<1>1 1985-04-12T19:20:50.52-04:00 host - - - -")
-            .expect("Should parse empty message");
-        assert_eq!(msg.timestamp, Some(482167250));
-        assert_eq!(msg.timestamp_nanos, Some(520000000));
-
-        let msg = parse_message("<1>1 1985-04-12T19:20:50-04:00 host - - - -")
-            .expect("Should parse empty message");
-        assert_eq!(msg.timestamp, Some(482167250));
-        assert_eq!(msg.timestamp_nanos, Some(0));
-
-        let msg = parse_message("<1>1 2003-08-24T05:14:15.000003-07:00 host - - - -")
-            .expect("Should parse empty message");
-        assert_eq!(msg.timestamp, Some(1061676855));
-        assert_eq!(msg.timestamp_nanos, Some(3000));
-
-        let msg = parse_message("<1>1 2003-08-24T05:14:15.000000003-07:00 host - - - -");
-        assert!(msg.is_err(), "expected parse fail");
-    }
-
-    #[test]
     fn test_empty_sd_value() {
         let msg = parse_message(r#"<29>1 2018-05-14T08:23:01.520Z leyal_test4 mgd 13894 UI_CHILD_EXITED [junos@2636.1.1.1.2.57 pid="14374" return-value="5" core-dump-status="" command="/usr/sbin/mustd"]"#).expect("must parse");
         assert_eq!(msg.facility, SyslogFacility::LOG_DAEMON);
@@ -521,8 +430,7 @@ mod tests {
         assert_eq!(msg.appname, Some(String::from("mgd")));
         assert_eq!(msg.procid, Some(message::ProcId::PID(13894)));
         assert_eq!(msg.msg, String::from(""));
-        assert_eq!(msg.timestamp, Some(1526286181));
-        assert_eq!(msg.timestamp_nanos, Some(520000000));
+        assert_eq!(msg.timestamp, Some(String::from("2018-05-14T08:23:01.520Z")));
         assert_eq!(msg.sd.len(), 1);
         let sd = msg.sd.find_sdid("junos@2636.1.1.1.2.57").expect("should contain root SD");
         let expected = {
